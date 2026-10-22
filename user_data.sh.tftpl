@@ -1,0 +1,117 @@
+#!/bin/bash
+set -euxo pipefail
+exec > >(tee /var/log/user-data.log | logger -t user-data -s 2>/dev/console) 2>&1
+
+dnf update -y
+dnf install -y python3 python3-pip
+mkdir -p /opt/three-tier-app
+
+cat > /opt/three-tier-app/app.py <<'PYAPP'
+import os
+import socket
+from datetime import datetime
+from flask import Flask, jsonify, Response
+import pymysql
+
+app = Flask(__name__)
+
+DB_HOST = "${db_host}"
+DB_NAME = "${db_name}"
+DB_USER = "${db_username}"
+DB_PASSWORD = "${db_password}"
+
+@app.get("/health")
+def health():
+    return jsonify(status="ok", service="application", host=socket.gethostname()), 200
+
+@app.get("/health/db")
+def db_health():
+    try:
+        conn = pymysql.connect(
+            host=DB_HOST, user=DB_USER, password=DB_PASSWORD,
+            database=DB_NAME, connect_timeout=5
+        )
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1")
+            result = cur.fetchone()[0]
+        conn.close()
+        return jsonify(status="ok", database="mysql", query_result=result, endpoint=DB_HOST), 200
+    except Exception as exc:
+        return jsonify(status="error", database="mysql", detail=str(exc)), 503
+
+@app.get("/process")
+def process():
+    html = """
+    <!doctype html><html><head><meta charset="utf-8"><title>Deployment Process</title>
+    <style>body{font:16px Arial;background:#0b1220;color:#e5e7eb;margin:40px;line-height:1.6}
+    main{max-width:900px;margin:auto}.card{background:#111c31;border:1px solid #263651;border-radius:14px;padding:22px;margin:16px 0}
+    h1,h2{color:#60a5fa}code{color:#a7f3d0}a{color:#93c5fd}</style></head><body><main>
+    <h1>Terraform deployment process</h1><p>This page is served by Flask on private EC2 instances behind an Application Load Balancer.</p>
+    <div class="card"><h2>Provisioning steps</h2><ol>
+    <li>Terraform configures the AWS provider and discovers the latest Amazon Linux 2023 AMI.</li>
+    <li>Creates a VPC, two public subnets, two private application subnets, and two private database subnets across two Availability Zones.</li>
+    <li>Creates an Internet Gateway, public routes, and a NAT Gateway for outbound access from private subnets.</li>
+    <li>Configures security groups: Internet → ALB (port 80) → application instances (port 5000) → RDS MySQL (port 3306).</li>
+    <li>Creates private Amazon RDS MySQL and a database subnet group.</li>
+    <li>Creates an Application Load Balancer, listener, target group, launch template, and two-instance Auto Scaling Group.</li>
+    <li>EC2 user data installs Python dependencies and starts the Flask service with systemd.</li>
+    <li>ALB health checks call <code>/health</code>; the database check is available at <code>/health/db</code>.</li>
+    </ol></div>
+    <div class="card"><h2>Useful URLs</h2>
+    <ul><li><a href="/">Application dashboard</a></li>
+    <li><a href="/health">Application health JSON</a></li>
+    <li><a href="/health/db">Database connectivity test</a></li>
+    <li><a href="/process">This deployment process</a></li></ul></div>
+    <p>Generated at """ + datetime.utcnow().isoformat() + """ UTC on instance <code>""" + socket.gethostname() + """</code>.</p>
+    <p>Note: this is a learning demo. Add HTTPS, secrets management, patching, and tighter egress controls before production use.</p>
+    </main></body></html>"""
+    return Response(html, mimetype="text/html")
+
+@app.get("/")
+def index():
+    html = """
+    <!doctype html><html><head><meta charset="utf-8"><title>AWS 3-Tier Application</title>
+    <style>body{font:16px Arial;background:#0b1220;color:#e5e7eb;margin:40px;line-height:1.6}
+    main{max-width:900px;margin:auto}.hero{padding:30px;border-radius:18px;background:linear-gradient(135deg,#172554,#164e63)}
+    .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px}
+    .card{background:#111c31;border:1px solid #263651;border-radius:14px;padding:20px}
+    h1,h2{color:#93c5fd}a{color:#a7f3d0}code{overflow-wrap:anywhere}</style></head><body><main>
+    <div class="hero"><h1>AWS 3-Tier Web Application</h1><p>Deployed with Terraform · Mumbai region · Application Load Balancer + EC2 Auto Scaling + RDS MySQL</p></div>
+    <h2>Architecture layers</h2><div class="grid">
+    <div class="card"><h2>Tier 1 — Web</h2><p>Public Application Load Balancer</p><p>HTTP port 80</p></div>
+    <div class="card"><h2>Tier 2 — App</h2><p>Two private EC2 instances</p><p>Flask service on port 5000</p></div>
+    <div class="card"><h2>Tier 3 — Data</h2><p>Private Amazon RDS MySQL</p><p>Port 3306 restricted to app tier</p></div></div>
+    <div class="card"><h2>Validation links</h2><ul>
+    <li><a href="/health">Application health</a></li>
+    <li><a href="/health/db">Database connection test</a></li>
+    <li><a href="/process">Infrastructure and deployment process</a></li></ul></div>
+    <p>Instance: <code>""" + socket.gethostname() + """</code></p>
+    </main></body></html>"""
+    return Response(html, mimetype="text/html")
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000)
+PYAPP
+
+python3 -m pip install --upgrade pip
+python3 -m pip install flask pymysql
+
+cat > /etc/systemd/system/three-tier-app.service <<'SERVICE'
+[Unit]
+Description=Three Tier Flask Web Application
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+WorkingDirectory=/opt/three-tier-app
+ExecStart=/usr/local/bin/flask --app app run --host=0.0.0.0 --port=5000
+Restart=always
+RestartSec=5
+User=root
+
+[Install]
+WantedBy=multi-user.target
+SERVICE
+
+systemctl daemon-reload
+systemctl enable --now three-tier-app

@@ -1,0 +1,9 @@
+aws_region         = "ap-south-1"
+project_name       = "three-tier-demo"
+app_instance_type  = "t3.micro"
+db_instance_class  = "db.t3.micro"
+db_name            = "appdb"
+db_username        = "appuser"
+db_multi_az        = false
+# Do not commit your real password or terraform.tfvars to Git.
+# Supply it in your shell with TF_VAR_db_password instead.
